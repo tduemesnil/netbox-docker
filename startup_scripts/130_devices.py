@@ -1,10 +1,10 @@
+import sys
+
 from dcim.models import Site, Rack, DeviceRole, DeviceType, Device, Platform
 from ipam.models import IPAddress
-from virtualization.models import Cluster
+from startup_script_utils import *
 from tenancy.models import Tenant
-from extras.models import CustomField, CustomFieldValue
-from startup_script_utils import load_yaml
-import sys
+from virtualization.models import Cluster
 
 devices = load_yaml('/opt/netbox/initializers/devices.yml')
 
@@ -27,7 +27,7 @@ optional_assocs = {
 }
 
 for params in devices:
-  custom_fields = params.pop('custom_fields', None)
+  custom_field_data = pop_custom_fields(params)
 
   for assoc, details in required_assocs.items():
     model, field = details
@@ -45,15 +45,6 @@ for params in devices:
   device, created = Device.objects.get_or_create(**params)
 
   if created:
-    if custom_fields is not None:
-      for cf_name, cf_value in custom_fields.items():
-        custom_field = CustomField.objects.get(name=cf_name)
-        custom_field_value = CustomFieldValue.objects.create(
-          field=custom_field,
-          obj=device,
-          value=cf_value
-        )
-
-        device.custom_field_values.add(custom_field_value)
+    set_custom_fields_values(device, custom_field_data)
 
     print("🖥️  Created device", device.name)
