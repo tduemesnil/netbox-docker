@@ -14,3 +14,6 @@ mkdir -p /backup/netbox
 
 On the Docker Host
 docker exec -it netbox-docker_postgres_1 pg_dump -U netbox -d netbox > /backup/netbox/netbox_`date +%d-%m-%Y_%H_%M_%S`.sql
+
+
+https://forum.level1techs.com/t/netbox-ipam-dcim-guide/132435/3
