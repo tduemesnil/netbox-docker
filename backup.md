@@ -17,3 +17,5 @@ docker exec -it netbox-docker_postgres_1 pg_dump -U netbox -d netbox > /backup/n
 
 
 https://forum.level1techs.com/t/netbox-ipam-dcim-guide/132435/3
+
+https://vineetcic.medium.com/backup-restore-a-dockerized-postgresql-database-ce37b2909364
