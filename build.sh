@@ -1,15 +1,14 @@
 #!/bin/bash
-# Clones the Netbox repository with git from Github and builds the Dockerfile
+# Clones the NetBox repository with git from Github and builds the Dockerfile
 
 echo "▶️ $0 $*"
 
 set -e
 
 if [ "${1}x" == "x" ] || [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
-  echo "Usage: ${0} <branch> [--push|--push-only]"
+  echo "Usage: ${0} <branch> [--push]"
   echo "  branch       The branch or tag to build. Required."
   echo "  --push       Pushes the built Docker image to the registry."
-  echo "  --push-only  Only pushes the Docker image to the registry, but does not build it."
   echo ""
   echo "You can use the following ENV variables to customize the build:"
   echo "  SRC_ORG     Which fork of netbox to use (i.e. github.com/\${SRC_ORG}/\${SRC_REPO})."
@@ -30,15 +29,10 @@ if [ "${1}x" == "x" ] || [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
   echo "                When <branch>=master:  latest"
   echo "                When <branch>=develop: snapshot"
   echo "                Else:                  same as <branch>"
-  echo "  DOCKER_REGISTRY The Docker repository's registry (i.e. '\${DOCKER_REGISTRY}/\${DOCKER_ORG}/\${DOCKER_REPO}'')"
+  echo "  IMAGE_NAMES The names used for the image including the registry"
   echo "              Used for tagging the image."
-  echo "              Default: docker.io"
-  echo "  DOCKER_ORG  The Docker repository's organisation (i.e. '\${DOCKER_REGISTRY}/\${DOCKER_ORG}/\${DOCKER_REPO}'')"
-  echo "              Used for tagging the image."
-  echo "              Default: netboxcommunity"
-  echo "  DOCKER_REPO The Docker repository's name (i.e. '\${DOCKER_REGISTRY}/\${DOCKER_ORG}/\${DOCKER_REPO}'')"
-  echo "              Used for tagging the image."
-  echo "              Default: netbox"
+  echo "              Default: docker.io/netboxcommunity/netbox"
+  echo "              Example: 'docker.io/netboxcommunity/netbox quay.io/netboxcommunity/netbox'"
   echo "  DOCKER_TAG  The name of the tag which is applied to the image."
   echo "              Useful for pushing into another registry than hub.docker.com."
   echo "              Default: \${DOCKER_REGISTRY}/\${DOCKER_ORG}/\${DOCKER_REPO}:\${TAG}"
@@ -49,10 +43,25 @@ if [ "${1}x" == "x" ] || [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
   echo "  DOCKERFILE  The name of Dockerfile to use."
   echo "              Default: Dockerfile"
   echo "  DOCKER_FROM The base image to use."
-  echo "              Default: 'python:3.8-alpine'"
-  echo "  DOCKER_TARGET A specific target to build."
-  echo "              It's currently not possible to pass multiple targets."
-  echo "              Default: main ldap"
+  echo "              Default: 'ubuntu:22.04'"
+  echo "  BUILDX_PLATFORMS"
+  echo "            Specifies the platform(s) to build the image for."
+  echo "            Example: 'linux/amd64,linux/arm64'"
+  echo "            Default: 'linux/amd64'"
+  echo "  BUILDX_BUILDER_NAME"
+  echo "              If defined, the image build will be assigned to the given builder."
+  echo "              If you specify this variable, make sure that the builder exists."
+  echo "              If this value is not defined, a new builx builder with the directory name of the"
+  echo "              current directory (i.e. '$(basename "${PWD}")') is created."
+  echo "              Example: 'clever_lovelace'"
+  echo "              Default: undefined"
+  echo "  BUILDX_REMOVE_BUILDER"
+  echo "              If defined (and only if BUILDX_BUILDER_NAME is undefined),"
+  echo "              then the buildx builder created by this script will be removed after use."
+  echo "              This is useful if you build NetBox Docker on an automated system that does"
+  echo "              not manage the builders for you."
+  echo "              Example: 'on'"
+  echo "              Default: undefined"
   echo "  HTTP_PROXY  The proxy to use for http requests."
   echo "              Example: http://proxy.domain.tld:3128"
   echo "              Default: undefined"
@@ -95,6 +104,11 @@ if [ "${1}x" == "x" ] || [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
   fi
 fi
 
+source ./build-functions/gh-functions.sh
+
+IMAGE_NAMES="${IMAGE_NAMES-docker.io/netboxcommunity/netbox}"
+IFS=' ' read -ra IMAGE_NAMES <<<"${IMAGE_NAMES}"
+
 ###
 # Enabling dry-run mode
 ###
@@ -105,8 +119,10 @@ else
   DRY="echo"
 fi
 
+gh_echo "::group::⤵️ Fetching the NetBox source code"
+
 ###
-# Variables for fetching the source
+# Variables for fetching the NetBox source
 ###
 SRC_ORG="${SRC_ORG-netbox-community}"
 SRC_REPO="${SRC_REPO-netbox}"
@@ -115,17 +131,23 @@ URL="${URL-https://github.com/${SRC_ORG}/${SRC_REPO}.git}"
 NETBOX_PATH="${NETBOX_PATH-.netbox}"
 
 ###
-# Fetching the source
+# Fetching the NetBox source
 ###
-if [ "${2}" != "--push-only" ] && [ -z "${SKIP_GIT}" ] ; then
-  echo "🌐 Checking out '${NETBOX_BRANCH}' of netbox from the url '${URL}' into '${NETBOX_PATH}'"
+if [ "${2}" != "--push-only" ] && [ -z "${SKIP_GIT}" ]; then
+  REMOTE_EXISTS=$(git ls-remote --heads --tags "${URL}" "${NETBOX_BRANCH}" | wc -l)
+  if [ "${REMOTE_EXISTS}" == "0" ]; then
+    echo "❌ Remote branch '${NETBOX_BRANCH}' not found in '${URL}'; Nothing to do"
+    gh_echo "::set-output name=skipped::true"
+    exit 0
+  fi
+  echo "🌐 Checking out '${NETBOX_BRANCH}' of NetBox from the url '${URL}' into '${NETBOX_PATH}'"
   if [ ! -d "${NETBOX_PATH}" ]; then
     $DRY git clone -q --depth 10 -b "${NETBOX_BRANCH}" "${URL}" "${NETBOX_PATH}"
   fi
 
   (
     $DRY cd "${NETBOX_PATH}"
-
+    # shellcheck disable=SC2030
     if [ -n "${HTTP_PROXY}" ]; then
       git config http.proxy "${HTTP_PROXY}"
     fi
@@ -135,8 +157,11 @@ if [ "${2}" != "--push-only" ] && [ -z "${SKIP_GIT}" ] ; then
     $DRY git checkout -qf FETCH_HEAD
     $DRY git prune
   )
-  echo "✅ Checked out netbox"
+  echo "✅ Checked out NetBox"
 fi
+
+gh_echo "::endgroup::"
+gh_echo "::group::🧮 Calculating Values"
 
 ###
 # Determining the value for DOCKERFILE
@@ -157,7 +182,7 @@ fi
 # Determining the value for DOCKER_FROM
 ###
 if [ -z "$DOCKER_FROM" ]; then
-  DOCKER_FROM="python:3.8-alpine"
+  DOCKER_FROM="ubuntu:22.04"
 fi
 
 ###
@@ -165,7 +190,7 @@ fi
 ###
 BUILD_DATE="$(date -u '+%Y-%m-%dT%H:%M+00:00')"
 
-if [ -d ".git" ]; then
+if [ -d ".git" ] && [ -z "${SKIP_GIT}" ]; then
   GIT_REF="$(git rev-parse HEAD)"
 fi
 
@@ -173,10 +198,19 @@ fi
 PROJECT_VERSION="${PROJECT_VERSION-$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' VERSION)}"
 
 # Get the Git information from the netbox directory
-if [ -d "${NETBOX_PATH}/.git" ]; then
-  NETBOX_GIT_REF=$(cd "${NETBOX_PATH}"; git rev-parse HEAD)
-  NETBOX_GIT_BRANCH=$(cd "${NETBOX_PATH}"; git rev-parse --abbrev-ref HEAD)
-  NETBOX_GIT_URL=$(cd "${NETBOX_PATH}"; git remote get-url origin)
+if [ -d "${NETBOX_PATH}/.git" ] && [ -z "${SKIP_GIT}" ]; then
+  NETBOX_GIT_REF=$(
+    cd "${NETBOX_PATH}"
+    git rev-parse HEAD
+  )
+  NETBOX_GIT_BRANCH=$(
+    cd "${NETBOX_PATH}"
+    git rev-parse --abbrev-ref HEAD
+  )
+  NETBOX_GIT_URL=$(
+    cd "${NETBOX_PATH}"
+    git remote get-url origin
+  )
 fi
 
 ###
@@ -186,187 +220,206 @@ DOCKER_REGISTRY="${DOCKER_REGISTRY-docker.io}"
 DOCKER_ORG="${DOCKER_ORG-netboxcommunity}"
 DOCKER_REPO="${DOCKER_REPO-netbox}"
 case "${NETBOX_BRANCH}" in
-  master)
-    TAG="${TAG-latest}";;
-  develop)
-    TAG="${TAG-snapshot}";;
-  *)
-    TAG="${TAG-$NETBOX_BRANCH}";;
+master)
+  TAG="${TAG-latest}"
+  ;;
+develop)
+  TAG="${TAG-snapshot}"
+  ;;
+*)
+  TAG="${TAG-$NETBOX_BRANCH}"
+  ;;
 esac
 
 ###
-# Determine targets to build
+# composing the final TARGET_DOCKER_TAG
 ###
-DEFAULT_DOCKER_TARGETS=("main" "ldap")
-DOCKER_TARGETS=( "${DOCKER_TARGET:-"${DEFAULT_DOCKER_TARGETS[@]}"}")
-echo "🏭 Building the following targets:" "${DOCKER_TARGETS[@]}"
+TARGET_DOCKER_TAG="${DOCKER_TAG-${TAG}}"
+TARGET_DOCKER_TAG_PROJECT="${TARGET_DOCKER_TAG}-${PROJECT_VERSION}"
 
 ###
-# Build each target
+# composing the additional DOCKER_SHORT_TAG,
+# i.e. "v2.6.1" becomes "v2.6",
+# which is only relevant for version tags
+# Also let "latest" follow the highest version
 ###
-export DOCKER_BUILDKIT=${DOCKER_BUILDKIT-1}
-for DOCKER_TARGET in "${DOCKER_TARGETS[@]}"; do
-  echo "🏗 Building the target '${DOCKER_TARGET}'"
+if [[ "${TAG}" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+  MAJOR=${BASH_REMATCH[1]}
+  MINOR=${BASH_REMATCH[2]}
 
-  ###
-  # composing the final TARGET_DOCKER_TAG
-  ###
-  TARGET_DOCKER_TAG="${DOCKER_TAG-${DOCKER_REGISTRY}/${DOCKER_ORG}/${DOCKER_REPO}:${TAG}}"
-  if [ "${DOCKER_TARGET}" != "main" ]; then
-    TARGET_DOCKER_TAG="${TARGET_DOCKER_TAG}-${DOCKER_TARGET}"
-  fi
-  if [ -n "${GH_ACTION}" ]; then
-    echo "FINAL_DOCKER_TAG=${TARGET_DOCKER_TAG}" >> $GITHUB_ENV
-    echo "::set-output name=skipped::false"
-  fi
+  TARGET_DOCKER_SHORT_TAG="${DOCKER_SHORT_TAG-v${MAJOR}.${MINOR}}"
+  TARGET_DOCKER_LATEST_TAG="latest"
+  TARGET_DOCKER_SHORT_TAG_PROJECT="${TARGET_DOCKER_SHORT_TAG}-${PROJECT_VERSION}"
+  TARGET_DOCKER_LATEST_TAG_PROJECT="${TARGET_DOCKER_LATEST_TAG}-${PROJECT_VERSION}"
+fi
 
-  ###
-  # composing the additional DOCKER_SHORT_TAG,
-  # i.e. "v2.6.1" becomes "v2.6",
-  # which is only relevant for version tags
-  # Also let "latest" follow the highest version
-  ###
-  if [[ "${TAG}" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
-    MAJOR=${BASH_REMATCH[1]}
-    MINOR=${BASH_REMATCH[2]}
-
-    TARGET_DOCKER_SHORT_TAG="${DOCKER_SHORT_TAG-${DOCKER_REGISTRY}/${DOCKER_ORG}/${DOCKER_REPO}:v${MAJOR}.${MINOR}}"
-    TARGET_DOCKER_LATEST_TAG="${DOCKER_REGISTRY}/${DOCKER_ORG}/${DOCKER_REPO}:latest"
-
-    if [ "${DOCKER_TARGET}" != "main" ]; then
-      TARGET_DOCKER_SHORT_TAG="${TARGET_DOCKER_SHORT_TAG}-${DOCKER_TARGET}"
-      TARGET_DOCKER_LATEST_TAG="${TARGET_DOCKER_LATEST_TAG}-${DOCKER_TARGET}"
-    fi
-  fi
-
-  ###
-  # Proceeding to buils stage, except if `--push-only` is passed
-  ###
-  if [ "${2}" != "--push-only" ] ; then
-    ###
-    # Checking if the build is necessary,
-    # meaning build only if one of those values changed:
-    # - Python base image digest (Label: PYTHON_BASE_DIGEST)
-    # - netbox git ref (Label: NETBOX_GIT_REF)
-    # - netbox-docker git ref (Label: org.label-schema.vcs-ref)
-    ###
-    # Load information from registry (only for docker.io)
-    SHOULD_BUILD="false"
-    BUILD_REASON=""
-    if [ -z "${GH_ACTION}" ]; then
-      # Asuming non Github builds should always proceed
-      SHOULD_BUILD="true"
-      BUILD_REASON="${BUILD_REASON} interactive"
-    elif [ "$DOCKER_REGISTRY" = "docker.io" ]; then
-      source ./build-functions/get-public-image-config.sh
-      IFS=':' read -ra DOCKER_FROM_SPLIT <<< "${DOCKER_FROM}"
-      if ! [[ ${DOCKER_FROM_SPLIT[0]} =~ .*/.* ]]; then
-        # Need to use "library/..." for images the have no two part name
-        DOCKER_FROM_SPLIT[0]="library/${DOCKER_FROM_SPLIT[0]}"
-      fi
-      PYTHON_LAST_LAYER=$(get_image_last_layer "${DOCKER_FROM_SPLIT[0]}" "${DOCKER_FROM_SPLIT[1]}")
-      mapfile -t IMAGES_LAYERS_OLD < <(get_image_layers "${DOCKER_ORG}"/"${DOCKER_REPO}" "${TAG}")
-      NETBOX_GIT_REF_OLD=$(get_image_label NETBOX_GIT_REF "${DOCKER_ORG}"/"${DOCKER_REPO}" "${TAG}")
-      GIT_REF_OLD=$(get_image_label org.label-schema.vcs-ref "${DOCKER_ORG}"/"${DOCKER_REPO}" "${TAG}")
-
-      if ! printf '%s\n' "${IMAGES_LAYERS_OLD[@]}" | grep -q -P "^${PYTHON_LAST_LAYER}\$"; then
-        SHOULD_BUILD="true"
-        BUILD_REASON="${BUILD_REASON} python"
-      fi
-      if [ "${NETBOX_GIT_REF}" != "${NETBOX_GIT_REF_OLD}" ]; then
-        SHOULD_BUILD="true"
-        BUILD_REASON="${BUILD_REASON} netbox"
-      fi
-      if [ "${GIT_REF}" != "${GIT_REF_OLD}" ]; then
-        SHOULD_BUILD="true"
-        BUILD_REASON="${BUILD_REASON} netbox-docker"
-      fi
-    else
-      SHOULD_BUILD="true"
-      BUILD_REASON="${BUILD_REASON} no-check"
-    fi
-    ###
-    # Composing all arguments for `docker build`
-    ###
-    DOCKER_BUILD_ARGS=(
-      --pull
-      --target "${DOCKER_TARGET}"
-      -f "${DOCKERFILE}"
-      -t "${TARGET_DOCKER_TAG}"
-    )
-    if [ -n "${TARGET_DOCKER_SHORT_TAG}" ]; then
-      DOCKER_BUILD_ARGS+=( -t "${TARGET_DOCKER_SHORT_TAG}" )
-      DOCKER_BUILD_ARGS+=( -t "${TARGET_DOCKER_LATEST_TAG}" )
-    fi
-
-    # --label
-    DOCKER_BUILD_ARGS+=(
-      --label "ORIGINAL_TAG=${TARGET_DOCKER_TAG}"
-
-      --label "org.label-schema.build-date=${BUILD_DATE}"
-      --label "org.opencontainers.image.created=${BUILD_DATE}"
-
-      --label "org.label-schema.version=${PROJECT_VERSION}"
-      --label "org.opencontainers.image.version=${PROJECT_VERSION}"
-    )
-    if [ -d ".git" ]; then
-      DOCKER_BUILD_ARGS+=(
-        --label "org.label-schema.vcs-ref=${GIT_REF}"
-        --label "org.opencontainers.image.revision=${GIT_REF}"
-      )
-    fi
-    if [ -d "${NETBOX_PATH}/.git" ]; then
-      DOCKER_BUILD_ARGS+=(
-        --label "NETBOX_GIT_BRANCH=${NETBOX_GIT_BRANCH}"
-        --label "NETBOX_GIT_REF=${NETBOX_GIT_REF}"
-        --label "NETBOX_GIT_URL=${NETBOX_GIT_URL}"
-      )
-    fi
-    if [ -n "${BUILD_REASON}" ]; then
-      BUILD_REASON=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$BUILD_REASON")
-      DOCKER_BUILD_ARGS+=( --label "BUILD_REASON=${BUILD_REASON}" )
-    fi
-
-    # --build-arg
-    DOCKER_BUILD_ARGS+=(   --build-arg "NETBOX_PATH=${NETBOX_PATH}" )
-
-    if [ -n "${DOCKER_FROM}" ]; then
-      DOCKER_BUILD_ARGS+=( --build-arg "FROM=${DOCKER_FROM}" )
-    fi
-    if [ -n "${HTTP_PROXY}" ]; then
-      DOCKER_BUILD_ARGS+=( --build-arg "http_proxy=${HTTP_PROXY}" )
-      DOCKER_BUILD_ARGS+=( --build-arg "https_proxy=${HTTPS_PROXY}" )
-    fi
-    if [ -n "${NO_PROXY}" ]; then
-      DOCKER_BUILD_ARGS+=( --build-arg "no_proxy=${NO_PROXY}" )
-    fi
-
-    ###
-    # Building the docker image
-    ###
-    if [ "${SHOULD_BUILD}" == "true" ]; then
-      echo "🐳 Building the Docker image '${TARGET_DOCKER_TAG}'."
-      echo "    Build reason set to: ${BUILD_REASON}"
-      $DRY docker build "${DOCKER_BUILD_ARGS[@]}" .
-      echo "✅ Finished building the Docker images '${TARGET_DOCKER_TAG}'"
-      echo "🔎 Inspecting labels on '${TARGET_DOCKER_TAG}'"
-      $DRY docker inspect "${TARGET_DOCKER_TAG}" --format "{{json .Config.Labels}}"
-    else
-      echo "Build skipped because sources didn't change"
-      echo "::set-output name=skipped::true"
-    fi
-  fi
-
-  ###
-  # Pushing the docker images if either `--push` or `--push-only` are passed
-  ###
-  if [ "${2}" == "--push" ] || [ "${2}" == "--push-only" ] ; then
-    source ./build-functions/docker-functions.sh
-    push_image_to_registry "${TARGET_DOCKER_TAG}"
-
-    if [ -n "${TARGET_DOCKER_SHORT_TAG}" ]; then
-      push_image_to_registry "${TARGET_DOCKER_SHORT_TAG}"
-      push_image_to_registry "${TARGET_DOCKER_LATEST_TAG}"
-    fi
-  fi
+IMAGE_NAME_TAGS=()
+for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
+  IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_TAG}")
+  IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_TAG_PROJECT}")
 done
+if [ -n "${TARGET_DOCKER_SHORT_TAG}" ]; then
+  for IMAGE_NAME in "${IMAGE_NAMES[@]}"; do
+    IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_SHORT_TAG}")
+    IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_SHORT_TAG_PROJECT}")
+    IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_LATEST_TAG}")
+    IMAGE_NAME_TAGS+=("${IMAGE_NAME}:${TARGET_DOCKER_LATEST_TAG_PROJECT}")
+  done
+fi
+
+gh_env "FINAL_DOCKER_TAG=${IMAGE_NAME_TAGS[0]}"
+
+###
+# Checking if the build is necessary,
+# meaning build only if one of those values changed:
+# - base image digest
+# - netbox git ref (Label: netbox.git-ref)
+# - netbox-docker git ref (Label: org.opencontainers.image.revision)
+###
+# Load information from registry (only for docker.io)
+SHOULD_BUILD="false"
+BUILD_REASON=""
+if [ -z "${GH_ACTION}" ]; then
+  # Asuming non Github builds should always proceed
+  SHOULD_BUILD="true"
+  BUILD_REASON="${BUILD_REASON} interactive"
+elif [[ "${IMAGE_NAME_TAGS[0]}" = docker.io* ]]; then
+  source ./build-functions/get-public-image-config.sh
+  IFS=':' read -ra DOCKER_FROM_SPLIT <<<"${DOCKER_FROM}"
+  if ! [[ ${DOCKER_FROM_SPLIT[0]} =~ .*/.* ]]; then
+    # Need to use "library/..." for images the have no two part name
+    DOCKER_FROM_SPLIT[0]="library/${DOCKER_FROM_SPLIT[0]}"
+  fi
+  IFS='/' read -ra ORG_REPO <<<"${IMAGE_NAMES[0]}"
+  echo "Checking labels for '${ORG_REPO[1]}' and '${ORG_REPO[2]}'"
+  BASE_LAST_LAYER=$(get_image_last_layer "${DOCKER_FROM_SPLIT[0]}" "${DOCKER_FROM_SPLIT[1]}")
+  mapfile -t IMAGES_LAYERS_OLD < <(get_image_layers "${ORG_REPO[1]}"/"${ORG_REPO[2]}" "${TAG}")
+  NETBOX_GIT_REF_OLD=$(get_image_label netbox.git-ref "${ORG_REPO[1]}"/"${ORG_REPO[2]}" "${TAG}")
+  GIT_REF_OLD=$(get_image_label org.opencontainers.image.revision "${ORG_REPO[1]}"/"${ORG_REPO[2]}" "${TAG}")
+
+  if ! printf '%s\n' "${IMAGES_LAYERS_OLD[@]}" | grep -q -P "^${BASE_LAST_LAYER}\$"; then
+    SHOULD_BUILD="true"
+    BUILD_REASON="${BUILD_REASON} debian"
+  fi
+  if [ "${NETBOX_GIT_REF}" != "${NETBOX_GIT_REF_OLD}" ]; then
+    SHOULD_BUILD="true"
+    BUILD_REASON="${BUILD_REASON} netbox"
+  fi
+  if [ "${GIT_REF}" != "${GIT_REF_OLD}" ]; then
+    SHOULD_BUILD="true"
+    BUILD_REASON="${BUILD_REASON} netbox-docker"
+  fi
+else
+  SHOULD_BUILD="true"
+  BUILD_REASON="${BUILD_REASON} no-check"
+fi
+
+if [ "${SHOULD_BUILD}" != "true" ]; then
+  echo "Build skipped because sources didn't change"
+  echo "::set-output name=skipped::true"
+  exit 0 # Nothing to do -> exit
+else
+  gh_echo "::set-output name=skipped::false"
+fi
+gh_echo "::endgroup::"
+
+###
+# Build the image
+###
+gh_echo "::group::🏗 Building the image"
+###
+# Composing all arguments for `docker build`
+###
+DOCKER_BUILD_ARGS=(
+  --pull
+  --target main
+  -f "${DOCKERFILE}"
+)
+for IMAGE_NAME in "${IMAGE_NAME_TAGS[@]}"; do
+  DOCKER_BUILD_ARGS+=(-t "${IMAGE_NAME}")
+done
+
+# --label
+DOCKER_BUILD_ARGS+=(
+  --label "netbox.original-tag=${TARGET_DOCKER_TAG_PROJECT}"
+  --label "org.opencontainers.image.created=${BUILD_DATE}"
+  --label "org.opencontainers.image.version=${PROJECT_VERSION}"
+)
+if [ -d ".git" ] && [ -z "${SKIP_GIT}" ]; then
+  DOCKER_BUILD_ARGS+=(
+    --label "org.opencontainers.image.revision=${GIT_REF}"
+  )
+fi
+if [ -d "${NETBOX_PATH}/.git" ] && [ -z "${SKIP_GIT}" ]; then
+  DOCKER_BUILD_ARGS+=(
+    --label "netbox.git-branch=${NETBOX_GIT_BRANCH}"
+    --label "netbox.git-ref=${NETBOX_GIT_REF}"
+    --label "netbox.git-url=${NETBOX_GIT_URL}"
+  )
+fi
+if [ -n "${BUILD_REASON}" ]; then
+  BUILD_REASON=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$BUILD_REASON")
+  DOCKER_BUILD_ARGS+=(--label "netbox.build-reason=${BUILD_REASON}")
+fi
+
+# --build-arg
+DOCKER_BUILD_ARGS+=(--build-arg "NETBOX_PATH=${NETBOX_PATH}")
+
+if [ -n "${DOCKER_FROM}" ]; then
+  DOCKER_BUILD_ARGS+=(--build-arg "FROM=${DOCKER_FROM}")
+fi
+# shellcheck disable=SC2031
+if [ -n "${HTTP_PROXY}" ]; then
+  DOCKER_BUILD_ARGS+=(--build-arg "http_proxy=${HTTP_PROXY}")
+  DOCKER_BUILD_ARGS+=(--build-arg "https_proxy=${HTTPS_PROXY}")
+fi
+if [ -n "${NO_PROXY}" ]; then
+  DOCKER_BUILD_ARGS+=(--build-arg "no_proxy=${NO_PROXY}")
+fi
+
+DOCKER_BUILD_ARGS+=(--platform "${BUILDX_PLATFORM-linux/amd64}")
+if [ "${2}" == "--push" ]; then
+  # output type=docker does not work with pushing
+  DOCKER_BUILD_ARGS+=(
+    --output=type=image
+    --push
+  )
+else
+  DOCKER_BUILD_ARGS+=(
+    --output=type=docker
+  )
+fi
+
+###
+# Building the docker image
+###
+if [ -z "${BUILDX_BUILDER_NAME}" ]; then
+  BUILDX_BUILDER_NAME="$(basename "${PWD}")"
+fi
+if ! docker buildx ls | grep --quiet --word-regexp "${BUILDX_BUILDER_NAME}"; then
+  echo "👷  Creating new Buildx Builder '${BUILDX_BUILDER_NAME}'"
+  $DRY docker buildx create --name "${BUILDX_BUILDER_NAME}"
+  BUILDX_BUILDER_CREATED="yes"
+fi
+
+echo "🐳 Building the Docker image '${TARGET_DOCKER_TAG_PROJECT}'."
+echo "    Build reason set to: ${BUILD_REASON}"
+$DRY docker buildx \
+  --builder "${BUILDX_BUILDER_NAME}" \
+  build \
+  "${DOCKER_BUILD_ARGS[@]}" \
+  .
+echo "✅ Finished building the Docker images"
+gh_echo "::endgroup::" # End group for Build
+
+gh_echo "::group::🏗 Image Labels"
+echo "🔎 Inspecting labels on '${IMAGE_NAME_TAGS[0]}'"
+$DRY docker inspect "${IMAGE_NAME_TAGS[0]}" --format "{{json .Config.Labels}}" | jq
+gh_echo "::endgroup::"
+
+gh_echo "::group::🏗 Clean up"
+if [ -n "${BUILDX_REMOVE_BUILDER}" ] && [ "${BUILDX_BUILDER_CREATED}" == "yes" ]; then
+  echo "👷  Removing Buildx Builder '${BUILDX_BUILDER_NAME}'"
+  $DRY docker buildx rm "${BUILDX_BUILDER_NAME}"
+fi
+gh_echo "::endgroup::"

@@ -5,9 +5,8 @@
 ####
 
 import re
-
-from os.path import dirname, abspath, join
 from os import environ
+from os.path import abspath, dirname, join
 
 # For reference see https://netbox.readthedocs.io/en/stable/configuration/
 # Based on https://github.com/netbox-community/netbox/blob/master/netbox/netbox/configuration.example.py
@@ -39,16 +38,18 @@ ALLOWED_HOSTS = environ.get('ALLOWED_HOSTS', '*').split(' ')
 # PostgreSQL database configuration. See the Django documentation for a complete list of available parameters:
 #   https://docs.djangoproject.com/en/stable/ref/settings/#databases
 DATABASE = {
-    'NAME': environ.get('DB_NAME', 'netbox'),            # Database name
-    'USER': environ.get('DB_USER', ''),                  # PostgreSQL username
+    'NAME': environ.get('DB_NAME', 'netbox'),       # Database name
+    'USER': environ.get('DB_USER', ''),             # PostgreSQL username
     'PASSWORD': _read_secret('db_password', environ.get('DB_PASSWORD', '')),
-                                                         # PostgreSQL password
-    'HOST': environ.get('DB_HOST', 'localhost'),         # Database server
-    'PORT': environ.get('DB_PORT', ''),                  # Database port (leave blank for default)
+                                                    # PostgreSQL password
+    'HOST': environ.get('DB_HOST', 'localhost'),    # Database server
+    'PORT': environ.get('DB_PORT', ''),             # Database port (leave blank for default)
     'OPTIONS': {'sslmode': environ.get('DB_SSLMODE', 'prefer')},
-                                                         # Database connection SSLMODE
+                                                    # Database connection SSLMODE
     'CONN_MAX_AGE': int(environ.get('DB_CONN_MAX_AGE', '300')),
-                                                         # Max database connection age
+                                                    # Max database connection age
+    'DISABLE_SERVER_SIDE_CURSORS': environ.get('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() == 'true',
+                                                    # Disable the use of server-side cursors transaction pooling
 }
 
 # Redis database settings. Redis is used for caching and for queuing background tasks such as webhook events. A separate
@@ -61,6 +62,7 @@ REDIS = {
         'PASSWORD': _read_secret('redis_password', environ.get('REDIS_PASSWORD', '')),
         'DATABASE': int(environ.get('REDIS_DATABASE', 0)),
         'SSL': environ.get('REDIS_SSL', 'False').lower() == 'true',
+        'INSECURE_SKIP_TLS_VERIFY': environ.get('REDIS_INSECURE_SKIP_TLS_VERIFY', 'False').lower() == 'true',
     },
     'caching': {
         'HOST': environ.get('REDIS_CACHE_HOST', environ.get('REDIS_HOST', 'localhost')),
@@ -68,6 +70,7 @@ REDIS = {
         'PASSWORD': _read_secret('redis_cache_password', environ.get('REDIS_CACHE_PASSWORD', environ.get('REDIS_PASSWORD', ''))),
         'DATABASE': int(environ.get('REDIS_CACHE_DATABASE', 1)),
         'SSL': environ.get('REDIS_CACHE_SSL', environ.get('REDIS_SSL', 'False')).lower() == 'true',
+        'INSECURE_SKIP_TLS_VERIFY': environ.get('REDIS_CACHE_INSECURE_SKIP_TLS_VERIFY', environ.get('REDIS_INSECURE_SKIP_TLS_VERIFY', 'False')).lower() == 'true',
     },
 }
 
@@ -107,9 +110,6 @@ BANNER_LOGIN = environ.get('BANNER_LOGIN', '')
 # BASE_PATH = 'netbox/'
 BASE_PATH = environ.get('BASE_PATH', '')
 
-# Cache timeout in seconds. Set to 0 to dissable caching. Defaults to 900 (15 minutes)
-CACHE_TIMEOUT = int(environ.get('CACHE_TIMEOUT', 900))
-
 # Maximum number of days to retain logged changes. Set to 0 to retain changes indefinitely. (Default: 90)
 CHANGELOG_RETENTION = int(environ.get('CHANGELOG_RETENTION', 90))
 
@@ -119,6 +119,11 @@ CHANGELOG_RETENTION = int(environ.get('CHANGELOG_RETENTION', 90))
 CORS_ORIGIN_ALLOW_ALL = environ.get('CORS_ORIGIN_ALLOW_ALL', 'False').lower() == 'true'
 CORS_ORIGIN_WHITELIST = list(filter(None, environ.get('CORS_ORIGIN_WHITELIST', 'https://localhost').split(' ')))
 CORS_ORIGIN_REGEX_WHITELIST = [re.compile(r) for r in list(filter(None, environ.get('CORS_ORIGIN_REGEX_WHITELIST', '').split(' ')))]
+
+# Cross-Site-Request-Forgery-Attack settings. If Netbox is sitting behind a reverse proxy, you might need to set the CSRF_TRUSTED_ORIGINS flag.
+# Django 4.0 requires to specify the URL Scheme in this setting. An example environment variable could be specified like:
+# CSRF_TRUSTED_ORIGINS=https://demo.netbox.dev http://demo.netbox.dev
+CSRF_TRUSTED_ORIGINS = list(filter(None, environ.get('CSRF_TRUSTED_ORIGINS', '').split(' ')))
 
 # Set to True to enable server debugging. WARNING: Debugging introduces a substantial performance penalty and may reveal
 # sensitive information about your installation. Only enable debugging while performing testing. Never enable debugging
@@ -147,6 +152,9 @@ ENFORCE_GLOBAL_UNIQUE = environ.get('ENFORCE_GLOBAL_UNIQUE', 'False').lower() ==
 # by anonymous users. List models in the form `<app>.<model>`. Add '*' to this list to exempt all models.
 EXEMPT_VIEW_PERMISSIONS = list(filter(None, environ.get('EXEMPT_VIEW_PERMISSIONS', '').split(' ')))
 
+# Enable GraphQL API.
+GRAPHQL_ENABLED = environ.get('GRAPHQL_ENABLED', 'True').lower() == 'true'
+
 # Enable custom logging. Please see the Django documentation for detailed guidance on configuring custom logs:
 #   https://docs.djangoproject.com/en/stable/topics/logging/
 LOGGING = {}
@@ -157,10 +165,13 @@ LOGIN_REQUIRED = environ.get('LOGIN_REQUIRED', 'False').lower() == 'true'
 
 # The length of time (in seconds) for which a user will remain logged into the web UI before being prompted to
 # re-authenticate. (Default: 1209600 [14 days])
-LOGIN_TIMEOUT = environ.get('LOGIN_TIMEOUT', None)
+LOGIN_TIMEOUT = int(environ.get('LOGIN_TIMEOUT', 1209600))
 
 # Setting this to True will display a "maintenance mode" banner at the top of every page.
 MAINTENANCE_MODE = environ.get('MAINTENANCE_MODE', 'False').lower() == 'true'
+
+# Maps provider
+MAPS_URL = environ.get('MAPS_URL', None)
 
 # An API consumer can request an arbitrary number of objects =by appending the "limit" parameter to the URL (e.g.
 # "?limit=1000"). This setting defines the maximum limit. Setting it to 0 or None will allow an API consumer to request
@@ -211,9 +222,6 @@ REMOTE_AUTH_HEADER = environ.get('REMOTE_AUTH_HEADER', 'HTTP_REMOTE_USER')
 REMOTE_AUTH_AUTO_CREATE_USER = environ.get('REMOTE_AUTH_AUTO_CREATE_USER', 'True').lower() == 'true'
 REMOTE_AUTH_DEFAULT_GROUPS = list(filter(None, environ.get('REMOTE_AUTH_DEFAULT_GROUPS', '').split(' ')))
 
-# This determines how often the GitHub API is called to check the latest release of NetBox. Must be at least 1 hour.
-RELEASE_CHECK_TIMEOUT = int(environ.get('RELEASE_CHECK_TIMEOUT', 24 * 3600))
-
 # This repository is used to check whether there is a new release of NetBox available. Set to None to disable the
 # version check or use the URL below to check for release in the official NetBox repository.
 # https://api.github.com/repos/netbox-community/netbox/releases
@@ -233,7 +241,7 @@ SCRIPTS_ROOT = environ.get('SCRIPTS_ROOT', '/etc/netbox/scripts')
 # By default, NetBox will store session data in the database. Alternatively, a file path can be specified here to use
 # local file storage instead. (This can be useful for enabling authentication on a standby instance with read-only
 # database access.) Note that the user as which NetBox runs must have read and write permissions to this path.
-SESSION_FILE_PATH = environ.get('REPORTS_ROOT', None)
+SESSION_FILE_PATH = environ.get('SESSIONS_ROOT', None)
 
 # Time zone (default: UTC)
 TIME_ZONE = environ.get('TIME_ZONE', 'UTC')
